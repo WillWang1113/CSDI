@@ -2,8 +2,8 @@
 #type: args
 
 train:
-  epochs: 100
-  batch_size: 8 
+  epochs: 20
+  batch_size: 128 
   lr: 1.0e-3
   itr_per_epoch: 1.0e+8
 

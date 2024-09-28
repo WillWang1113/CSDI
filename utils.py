@@ -3,6 +3,55 @@ import torch
 from torch.optim import Adam
 from tqdm import tqdm
 import pickle
+from typing import Optional, Union
+
+def mse(
+    y: np.ndarray,
+    y_hat: np.ndarray,
+    weights: Optional[np.ndarray] = None,
+    axis: Optional[int] = None,
+) -> Union[float, np.ndarray]:
+
+    # _metric_protections(y, y_hat, weights)
+
+    delta_y = np.square(y - y_hat)
+    if weights is not None:
+        mse = np.average(
+            delta_y[~np.isnan(delta_y)], weights=weights[~np.isnan(delta_y)], axis=axis
+        )
+    else:
+        mse = np.nanmean(delta_y, axis=axis)
+
+    return mse
+
+
+def mqloss(
+    y: np.ndarray,
+    y_hat: np.ndarray,
+    quantiles: np.ndarray,
+    weights: Optional[np.ndarray] = None,
+    axis: Optional[int] = None,
+) -> Union[float, np.ndarray]:
+
+    if weights is None:
+        weights = np.ones(y.shape)
+
+    n_q = len(quantiles)
+
+    y_rep = np.expand_dims(y, axis=-1)
+    error = y_hat - y_rep
+    sq = np.maximum(-error, np.zeros_like(error))
+    s1_q = np.maximum(error, np.zeros_like(error))
+    mqloss = quantiles * sq + (1 - quantiles) * s1_q
+
+    # Match y/weights dimensions and compute weighted average
+    weights = np.repeat(np.expand_dims(weights, axis=-1), repeats=n_q, axis=-1)
+    mqloss = np.average(mqloss, weights=weights, axis=axis)
+
+    return mqloss
+
+
+
 
 
 def train(
@@ -117,7 +166,7 @@ def calc_quantile_CRPS_sum(target, forecast, eval_points, mean_scaler, scaler):
         CRPS += q_loss / denom
     return CRPS.item() / len(quantiles)
 
-def evaluate(model, test_loader, nsample=100, scaler=1, mean_scaler=0, foldername=""):
+def evaluate(model, test_loader, nsample=100, scaler=1, mean_scaler=0, foldername="", pred_len=96):
 
     with torch.no_grad():
         model.eval()
@@ -147,67 +196,84 @@ def evaluate(model, test_loader, nsample=100, scaler=1, mean_scaler=0, foldernam
                 all_observed_time.append(observed_time)
                 all_generated_samples.append(samples)
 
-                mse_current = (
-                    ((samples_median.values - c_target) * eval_points) ** 2
-                ) * (scaler ** 2)
-                mae_current = (
-                    torch.abs((samples_median.values - c_target) * eval_points) 
-                ) * scaler
+                # mse_current = (
+                #     ((samples_median.values - c_target) * eval_points) ** 2
+                # ) * (scaler ** 2)
+                # mae_current = (
+                #     torch.abs((samples_median.values - c_target) * eval_points) 
+                # ) * scaler
 
-                mse_total += mse_current.sum().item()
-                mae_total += mae_current.sum().item()
-                evalpoints_total += eval_points.sum().item()
+                # mse_total += mse_current.sum().item()
+                # mae_total += mae_current.sum().item()
+                # evalpoints_total += eval_points.sum().item()
 
-                it.set_postfix(
-                    ordered_dict={
-                        "rmse_total": np.sqrt(mse_total / evalpoints_total),
-                        "mae_total": mae_total / evalpoints_total,
-                        "batch_no": batch_no,
-                    },
-                    refresh=True,
-                )
+                # it.set_postfix(
+                #     ordered_dict={
+                #         "rmse_total": np.sqrt(mse_total / evalpoints_total),
+                #         "mae_total": mae_total / evalpoints_total,
+                #         "batch_no": batch_no,
+                #     },
+                #     refresh=True,
+                # )
 
             with open(
                 foldername + "/generated_outputs_nsample" + str(nsample) + ".pk", "wb"
             ) as f:
-                all_target = torch.cat(all_target, dim=0)
-                all_evalpoint = torch.cat(all_evalpoint, dim=0)
-                all_observed_point = torch.cat(all_observed_point, dim=0)
-                all_observed_time = torch.cat(all_observed_time, dim=0)
-                all_generated_samples = torch.cat(all_generated_samples, dim=0)
+                all_target = torch.cat(all_target, dim=0).cpu().numpy()
+                # all_evalpoint = torch.cat(all_evalpoint, dim=0).cpu().numpy()
+                # all_observed_point = torch.cat(all_observed_point, dim=0).cpu().numpy()
+                # all_observed_time = torch.cat(all_observed_time, dim=0).cpu().numpy()
+                all_generated_samples = torch.cat(all_generated_samples, dim=0).cpu().numpy()
 
                 pickle.dump(
                     [
                         all_generated_samples,
                         all_target,
-                        all_evalpoint,
-                        all_observed_point,
-                        all_observed_time,
-                        scaler,
-                        mean_scaler,
+                        # all_evalpoint,
+                        # all_observed_point,
+                        # all_observed_time,
+                        # scaler,
+                        # mean_scaler,
                     ],
                     f,
                 )
+            quantiles=(np.arange(9) + 1) / 10
+            y_pred = all_generated_samples.transpose((1,0,2,3))
+            y_pred_point = np.mean(y_pred, axis=0)[:, -pred_len:, :]
+            y_pred_q = np.quantile(y_pred, quantiles, axis=0)
+            y_pred_q = np.transpose(y_pred_q, (1,2,3,0))[:, -pred_len:, :, :]
+            y_real = all_target[:, -pred_len:, :]
+            
+            
+            
+            
 
-            CRPS = calc_quantile_CRPS(
-                all_target, all_generated_samples, all_evalpoint, mean_scaler, scaler
-            )
-            CRPS_sum = calc_quantile_CRPS_sum(
-                all_target, all_generated_samples, all_evalpoint, mean_scaler, scaler
-            )
+            MSE = mse(y_real, y_pred_point)
+            CRPS = mqloss(y_real, y_pred_q, quantiles=np.array(quantiles))
+            
+
+            # CRPS = calc_quantile_CRPS(
+            #     all_target, all_generated_samples, all_evalpoint, mean_scaler, scaler
+            # )
+            # CRPS_sum = calc_quantile_CRPS_sum(
+            #     all_target, all_generated_samples, all_evalpoint, mean_scaler, scaler
+            # )
+            
 
             with open(
                 foldername + "/result_nsample" + str(nsample) + ".pk", "wb"
             ) as f:
                 pickle.dump(
                     [
-                        np.sqrt(mse_total / evalpoints_total),
-                        mae_total / evalpoints_total,
+                        MSE,
+                        # mae_total / evalpoints_total,
                         CRPS,
                     ],
                     f,
                 )
-                print("RMSE:", np.sqrt(mse_total / evalpoints_total))
-                print("MAE:", mae_total / evalpoints_total)
+                # print("RMSE:", np.sqrt(mse_total / evalpoints_total))
+                print("MSE:", MSE)
                 print("CRPS:", CRPS)
-                print("CRPS_sum:", CRPS_sum)
+                # print("CRPS_sum:", CRPS_sum)
+
+
